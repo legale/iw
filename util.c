@@ -5,6 +5,8 @@
 #include "iw.h"
 #include "nl80211.h"
 
+#include "json/iw_json_print.h"
+
 void mac_addr_n2a(char *mac_addr, const unsigned char *arg)
 {
 	int i, l;
@@ -222,19 +224,27 @@ int ieee80211_frequency_to_channel(int freq)
 		return 0;
 }
 
-void print_ssid_escaped(const uint8_t len, const uint8_t *data)
-{
-	int i;
+static char *ssid_escape(const uint8_t len, const uint8_t *data) {
+    static char buf[512]; // static buffer
+	int bufsize = (int)sizeof(buf);
+	int pos = 0;
 
-	for (i = 0; i < len; i++) {
-		if (isprint(data[i]) && data[i] != ' ' && data[i] != '\\')
-			printf("%c", data[i]);
-		else if (data[i] == ' ' &&
-			 (i != 0 && i != len -1))
-			printf(" ");
-		else
-			printf("\\x%.2x", data[i]);
-	}
+    for (int i = 0; i < len && pos < bufsize - 5; i++) { // leave space for "\xXX" and terminator byte
+        if (isprint(data[i]) && data[i] != ' ' && data[i] != '\\') {
+            buf[pos++] = data[i];
+        } else if (data[i] == ' ' && (i != 0 && i != len - 1)) {
+            buf[pos++] = ' ';
+        } else {
+            pos += snprintf(buf + pos, bufsize - pos, "\\x%.2x", data[i]);
+        }
+    }
+    buf[pos] = '\0'; // set terminator byte
+    return buf;
+}
+
+void print_ssid_escaped(const uint8_t len, const uint8_t *data) {
+	char *escaped_ssid = ssid_escape(len, data);
+	iw_printf("SSID", "%s", escaped_ssid);
 }
 
 static int hex2num(char digit)
@@ -331,7 +341,7 @@ int parse_keys(struct nl_msg *msg, char **argv[], int *argc)
 		NLA_PUT_U32(msg, NL80211_ATTR_WPA_VERSIONS, NL80211_WPA_VERSION_2);
 
 		if (strlen(&arg[pos]) != (sizeof(psk_keybuf) * 2) || !hex2bin(&arg[pos], psk_keybuf)) {
-			printf("Bad PSK\n");
+			iw_printf("Bad PSK", "true");
 			return -EINVAL;
 		}
 
@@ -810,34 +820,52 @@ static void print_mcs_index(const __u8 *mcs)
 {
 	int mcs_bit, prev_bit = -2, prev_cont = 0;
 
+	char buf[8];
+	char *p = (char *)buf;
+	int bufleft = (int)sizeof(buf);
+	int written = 0;
+
 	for (mcs_bit = 0; mcs_bit <= 76; mcs_bit++) {
-		unsigned int mcs_octet = mcs_bit/8;
-		unsigned int MCS_RATE_BIT = 1 << mcs_bit % 8;
-		bool mcs_rate_idx_set;
+		unsigned int mcs_octet = mcs_bit / 8;
+		unsigned int MCS_RATE_BIT = 1 << (mcs_bit % 8);
+		bool mcs_rate_idx_set = (mcs[mcs_octet] & MCS_RATE_BIT) != 0;
 
-		mcs_rate_idx_set = !!(mcs[mcs_octet] & MCS_RATE_BIT);
+		if (!mcs_rate_idx_set) continue;
 
-		if (!mcs_rate_idx_set)
-			continue;
 
 		if (prev_bit != mcs_bit - 1) {
-			if (prev_bit != -2)
-				printf("%d, ", prev_bit);
-			else
-				printf(" ");
-			printf("%d", mcs_bit);
+			if (prev_bit != -2) {
+				//print single or range value
+				snprintf(p, bufleft, "%d", prev_bit);
+				iw_printf(NULL, "%s", buf);
+
+				//reset buffer
+				p = buf;
+				bufleft = sizeof(buf);
+
+			}
+
+			written = snprintf(p, bufleft, "%d", mcs_bit);
+			p += written;
+			bufleft -= written;
 			prev_cont = 0;
 		} else if (!prev_cont) {
-			printf("-");
+			written = snprintf(p, bufleft, "-");
+			p += written;
+			bufleft -= written;
 			prev_cont = 1;
 		}
 
 		prev_bit = mcs_bit;
 	}
 
-	if (prev_cont)
-		printf("%d", prev_bit);
-	printf("\n");
+	//if is range write last chunk
+	if (prev_cont) {
+		snprintf(p, bufleft, "%d", prev_bit);
+	}
+
+	//print last value
+	iw_printf(NULL, "%s", buf);
 }
 
 /*
@@ -880,18 +908,18 @@ void print_ampdu_length(__u8 exponent)
 	max_ampdu_length = compute_ampdu_length(exponent);
 
 	if (max_ampdu_length) {
-		printf("\t\tMaximum RX AMPDU length %d bytes (exponent: 0x0%02x)\n",
-		       max_ampdu_length, exponent);
+		iw_printf("max_ampdu_length", "%d", max_ampdu_length);
 	} else {
-		printf("\t\tMaximum RX AMPDU length: unrecognized bytes "
-		       "(exponent: %d)\n", exponent);
+		iw_printf("max_ampdu_length", "%d", -1);
 	}
+	iw_printf("max_ampdu_exponent", "0x0%02x", exponent);
+
 }
 
 void print_ampdu_spacing(__u8 spacing)
 {
-	printf("\t\tMinimum RX AMPDU time spacing: %s (0x%02x)\n",
-	       print_ampdu_space(spacing), spacing);
+	iw_printf("min_rx_ampdu_time_spacing", "%s", print_ampdu_space(spacing));
+	iw_printf("min_rx_ampdu_time_spacing_value", "0x0%02x", spacing);
 }
 
 void print_ht_capability(__u16 cap)
@@ -899,10 +927,11 @@ void print_ht_capability(__u16 cap)
 #define PRINT_HT_CAP(_cond, _str) \
 	do { \
 		if (_cond) \
-			printf("\t\t\t" _str "\n"); \
+			iw_printf(NULL, _str); \
 	} while (0)
 
-	printf("\t\tCapabilities: 0x%02x\n", cap);
+	iw_printf("capabilities_value", "0x%02x", cap);
+	iw_arr_openf("capabilities");
 
 	PRINT_HT_CAP((cap & BIT(0)), "RX LDPC");
 	PRINT_HT_CAP((cap & BIT(1)), "HT20/HT40");
@@ -941,6 +970,8 @@ void print_ht_capability(__u16 cap)
 	PRINT_HT_CAP((cap & BIT(14)), "40 MHz Intolerant");
 
 	PRINT_HT_CAP((cap & BIT(15)), "L-SIG TXOP protection");
+
+	iw_arr_close();
 #undef PRINT_HT_CAP
 }
 
@@ -956,32 +987,28 @@ void print_ht_mcs(const __u8 *mcs)
 	tx_max_num_spatial_streams = ((mcs[12] >> 2) & 3) + 1;
 	tx_unequal_modulation = !!(mcs[12] & (1 << 4));
 
-	if (max_rx_supp_data_rate)
-		printf("\t\tHT Max RX data rate: %d Mbps\n", max_rx_supp_data_rate);
+	if (max_rx_supp_data_rate){
+		iw_printf("ht_max_rx_data_rate_mbps", "%d", max_rx_supp_data_rate);
+	}
 	/* XXX: else see 9.6.0e.5.3 how to get this I think */
 
 	if (tx_mcs_set_defined) {
 		if (tx_mcs_set_equal) {
-			printf("\t\tHT TX/RX MCS rate indexes supported:");
+			iw_arr_openf("ht_tx_rx_mcs_idx_supported");
 			print_mcs_index(mcs);
+			iw_arr_close();
 		} else {
-			printf("\t\tHT RX MCS rate indexes supported:");
+			iw_arr_openf("ht_rx_mcs_idx_supported");
 			print_mcs_index(mcs);
+			iw_arr_close();
 
-			if (tx_unequal_modulation)
-				printf("\t\tTX unequal modulation supported\n");
-			else
-				printf("\t\tTX unequal modulation not supported\n");
-
-			printf("\t\tHT TX Max spatial streams: %d\n",
-				tx_max_num_spatial_streams);
-
-			printf("\t\tHT TX MCS rate indexes supported may differ\n");
+			iw_printf("tx_unequal_modulation", "%s", tx_unequal_modulation);
+			iw_printf("ht_tx_max_spatial_streams", "%d", tx_max_num_spatial_streams);
 		}
 	} else {
-		printf("\t\tHT RX MCS rate indexes supported:");
+		iw_arr_openf("ht_rx_mcs_idx_supported");
 		print_mcs_index(mcs);
-		printf("\t\tHT TX MCS rate indexes are undefined\n");
+		iw_arr_close();
 	}
 }
 
@@ -1096,13 +1123,13 @@ static const struct vht_nss_ratio nss_ratio_tbl[3][4] = {
 	},
 };
 
-static void print_nss_ratio_value(int ratio)
+static const char *nss_ratio_value(int ratio)
 {
 	const char *rstr;
 
 	switch (ratio) {
 	case 4:
-		return;
+		return NULL;
 	case 3:
 		rstr = "3/4";
 		break;
@@ -1117,52 +1144,53 @@ static void print_nss_ratio_value(int ratio)
 		break;
 	}
 
-	printf("(%s NSS) ", rstr);
+	return rstr;
 }
 
 static void print_nss_ratio(const char *str, bool force_show, int ratio)
-{
+{ 	
 	if (!ratio)
 		return;
 	if (ratio == 4) {
 		if (force_show)
-			printf("%s ", str);
+			iw_printf("value", "%s", str);
 	} else {
-		printf("%s ", str);
-		print_nss_ratio_value(ratio);
+		iw_printf("value", "%s NSS", nss_ratio_value(ratio));
 	}
 }
 
 void print_vht_info(__u32 capa, const __u8 *mcs)
 {
+#define PRINT_VHT_CAPA(_bit, _str) \
+	do { \
+		if (capa & BIT(_bit)){ \
+			iw_printf(_str, "%s", "true"); \
+		} \
+	} while (0)
+
 	__u16 tmp;
 	__u32 supp_chan_width, ext_nss_bw;
 	const struct vht_nss_ratio *nss_tbl;
 	int i;
 
-	printf("\t\tVHT Capabilities (0x%.8x):\n", capa);
 
-#define PRINT_VHT_CAPA(_bit, _str) \
-	do { \
-		if (capa & BIT(_bit)) \
-			printf("\t\t\t" _str "\n"); \
-	} while (0)
-
-	printf("\t\t\tMax MPDU length: ");
+	iw_obj_openf("VHT Capabilities");
+	iw_printf("VHT Capabilities Raw Value", "0x%.8x", capa);
 	switch (capa & 3) {
-	case 0: printf("3895\n"); break;
-	case 1: printf("7991\n"); break;
-	case 2: printf("11454\n"); break;
-	case 3: printf("(reserved)\n");
+		case 0: iw_printf("Data", "3895"); break;
+		case 1: iw_printf("Data", "7991"); break;
+		case 2: iw_printf("Data", "11454"); break;
+		case 3: iw_printf("Data", "reserved");
 	}
+	iw_obj_close();
+	iw_obj_openf("Supported Channel Width");
 
-	printf("\t\t\tSupported Channel Width: ");
 	supp_chan_width = (capa >> 2) & 3;
 	ext_nss_bw = (capa >> 30) & 3;
 	nss_tbl = &nss_ratio_tbl[supp_chan_width][ext_nss_bw];
 
 	if (!nss_tbl->valid)
-		printf("(reserved)\n");
+		iw_printf("reserved", "true");
 	else if (nss_tbl->bw_20 == 4 &&
 		 nss_tbl->bw_40 == 4 &&
 		 nss_tbl->bw_80 == 4 &&
@@ -1170,9 +1198,15 @@ void print_vht_info(__u32 capa, const __u8 *mcs)
 		 (!nss_tbl->bw_80_80 || nss_tbl->bw_80_80 == 4)) {
 		/* old style print format */
 		switch (supp_chan_width) {
-		case 0: printf("neither 160 nor 80+80\n"); break;
-		case 1: printf("160 MHz\n"); break;
-		case 2: printf("160 MHz, 80+80 MHz\n"); break;
+			case 0:
+				break;
+			case 1:
+				iw_printf("160", "true");
+				break;
+			case 2:
+				iw_printf("160", "true");
+				iw_printf("80+80", "true");
+				break;
 		}
 	} else {
 		print_nss_ratio("20Mhz", false, nss_tbl->bw_20);
@@ -1180,8 +1214,8 @@ void print_vht_info(__u32 capa, const __u8 *mcs)
 		print_nss_ratio("80Mhz", false, nss_tbl->bw_80);
 		print_nss_ratio("160Mhz", false, nss_tbl->bw_160);
 		print_nss_ratio("80+80Mhz", false, nss_tbl->bw_80_80);
-		printf("\n");
 	}
+	iw_obj_close();
 
 	PRINT_VHT_CAPA(4, "RX LDPC");
 	PRINT_VHT_CAPA(5, "short GI (80 MHz)");
@@ -1201,36 +1235,42 @@ void print_vht_info(__u32 capa, const __u8 *mcs)
 	PRINT_VHT_CAPA(28, "RX antenna pattern consistency");
 	PRINT_VHT_CAPA(29, "TX antenna pattern consistency");
 
-	printf("\t\tVHT RX MCS set:\n");
+
+	iw_obj_openf("VHT RX MCS set");
 	tmp = mcs[0] | (mcs[1] << 8);
 	for (i = 1; i <= 8; i++) {
-		printf("\t\t\t%d streams: ", i);
+		char buf[16];
+		snprintf(buf, sizeof(buf), "%d streams", i);
 		switch ((tmp >> ((i-1)*2) ) & 3) {
-		case 0: printf("MCS 0-7\n"); break;
-		case 1: printf("MCS 0-8\n"); break;
-		case 2: printf("MCS 0-9\n"); break;
-		case 3: printf("not supported\n"); break;
+			case 0: iw_printf(buf, "MCS 0-7"); break;
+			case 1: iw_printf(buf, "MCS 0-8"); break;
+			case 2: iw_printf(buf, "MCS 0-9"); break;
+			case 3: iw_printf(buf, "not supported"); break;
 		}
 	}
+	iw_obj_close();
 	tmp = mcs[2] | (mcs[3] << 8);
-	printf("\t\tVHT RX highest supported: %d Mbps\n", tmp & 0x1fff);
+	
+	iw_printf("VHT RX highest supported Mbps", "%d", tmp & 0x1fff);
 
-	printf("\t\tVHT TX MCS set:\n");
+	iw_obj_openf("VHT TX MCS set");
 	tmp = mcs[4] | (mcs[5] << 8);
 	for (i = 1; i <= 8; i++) {
-		printf("\t\t\t%d streams: ", i);
+		char buf[16];
+		snprintf(buf, sizeof(buf), "%d streams", i);
 		switch ((tmp >> ((i-1)*2) ) & 3) {
-		case 0: printf("MCS 0-7\n"); break;
-		case 1: printf("MCS 0-8\n"); break;
-		case 2: printf("MCS 0-9\n"); break;
-		case 3: printf("not supported\n"); break;
+			case 0: iw_printf(buf, "MCS 0-7"); break;
+			case 1: iw_printf(buf, "MCS 0-8"); break;
+			case 2: iw_printf(buf, "MCS 0-9"); break;
+			case 3: iw_printf(buf, "not supported"); break;
 		}
 	}
-	tmp = mcs[6] | (mcs[7] << 8);
-	printf("\t\tVHT TX highest supported: %d Mbps\n", tmp & 0x1fff);
+	iw_obj_close();
 
-	printf("\t\tVHT extended NSS: %ssupported\n",
-	       (tmp & (1 << 13)) ? "" : "not ");
+	tmp = mcs[6] | (mcs[7] << 8);
+	iw_printf("VHT TX Highest Supported Mbps", "%d", tmp & 0x1fff);
+
+	iw_printf("VHT extended NSS Supported", "%s", (tmp & (1 << 13)) ? true : false);
 }
 
 static void __print_he_capa(const __u16 *mac_cap,
@@ -1246,13 +1286,13 @@ static void __print_he_capa(const __u16 *mac_cap,
 	#define PRINT_HE_CAP(_var, _idx, _bit, _str) \
 	do { \
 		if (_var[_idx] & BIT(_bit)) \
-			printf("%s\t\t\t" _str "\n", pre); \
+			iw_printf(NULL, _str); \
 	} while (0)
 
 	#define PRINT_HE_CAP_MASK(_var, _idx, _shift, _mask, _str) \
 	do { \
 		if ((_var[_idx] >> _shift) & _mask) \
-			printf("%s\t\t\t" _str ": %d\n", pre, (_var[_idx] >> _shift) & _mask); \
+			iw_printf(NULL, "%s %d", _str, (_var[_idx] >> _shift) & _mask); \
 	} while (0)
 
 	#define PRINT_HE_MAC_CAP(...) PRINT_HE_CAP(mac_cap, __VA_ARGS__)
@@ -1261,10 +1301,9 @@ static void __print_he_capa(const __u16 *mac_cap,
 	#define PRINT_HE_PHY_CAP0(_idx, _bit, ...) PRINT_HE_CAP(phy_cap, _idx, _bit + 8, __VA_ARGS__)
 	#define PRINT_HE_PHY_CAP_MASK(...) PRINT_HE_CAP_MASK(phy_cap, __VA_ARGS__)
 
-	printf("%s\t\tHE MAC Capabilities (0x", pre);
-	for (i = 0; i < 3; i++)
-		printf("%04x", mac_cap[i]);
-	printf("):\n");
+	iw_printf("HE MAC Capabilities Raw Value", "%s 0x%04x%04x%04x", pre, mac_cap[0], mac_cap[1], mac_cap[2]);
+
+	iw_arr_openf("HE MAC Capabilities");
 
 	PRINT_HE_MAC_CAP(0, 0, "+HTC HE Supported");
 	PRINT_HE_MAC_CAP(0, 1, "TWT Requester");
@@ -1301,10 +1340,21 @@ static void __print_he_capa(const __u16 *mac_cap,
 	PRINT_HE_MAC_CAP(2, 11, "UL 2x996-Tone RU");
 	PRINT_HE_MAC_CAP(2, 12, "OM Control UL MU Data Disable RX");
 
-	printf("%s\t\tHE PHY Capabilities: (0x", pre);
-	for (i = 0; i < 11; i++)
-		printf("%02x", ((__u8 *)phy_cap)[i + 1]);
-	printf("):\n");
+	{
+		char buf[64] = {0};
+		int bufleft = (int)sizeof(buf);
+		char *p = buf;
+		int written = 0;
+		for (i = 0; i < 11; i++){
+			written = snprintf(p, bufleft, "%02x", ((__u8 *)phy_cap)[i + 1]);
+			bufleft -= written;
+			p += written;
+		}
+
+		iw_arr_close();
+		iw_printf("HE Phy Capabilities Raw Value", "%s 0x%s", pre, buf);
+		iw_arr_openf("HE Phy Capabilities");
+	}
 
 	PRINT_HE_PHY_CAP0(0, 1, "HE40/2.4GHz");
 	PRINT_HE_PHY_CAP0(0, 2, "HE40/HE80/5GHz");
@@ -1371,6 +1421,8 @@ static void __print_he_capa(const __u16 *mac_cap,
 	PRINT_HE_PHY_CAP(5, 4, "RX Full BW SU Using HE MU PPDU with Compression SIGB");
 	PRINT_HE_PHY_CAP(5, 5, "RX Full BW SU Using HE MU PPDU with Non-Compression SIGB");
 
+	iw_arr_close();
+
 	mcs_used = 0;
 	for (i = 0; i < 3; i++) {
 		__u8 phy_cap_support[] = { BIT(1) | BIT(2), BIT(3), BIT(4) };
@@ -1386,19 +1438,26 @@ static void __print_he_capa(const __u16 *mac_cap,
 
 		for (j = 0; j < 2; j++) {
 			int k;
-			printf("%s\t\tHE %s MCS and NSS set %s MHz\n", pre, j ? "TX" : "RX", bw[i]);
+			char buf[128] = {0};
+			snprintf(buf, sizeof(buf), "%s_he_%s_mcs_and_nss_set", pre, j ? "tx" : "rx");
+			iw_obj_openf(buf);
+			iw_printf("Width, MHz", "%s", bw[i]);
+			iw_obj_openf("Streams");
 			for (k = 0; k < 8; k++) {
 				__u16 mcs = mcs_set[(i * 2) + j];
 				mcs >>= k * 2;
 				mcs &= 0x3;
-				printf("%s\t\t\t%d streams: ", pre, k + 1);
+				char keybuf[16];
+				snprintf(keybuf, sizeof(keybuf), "%s_%d_streams", pre, k + 1);
 				if (mcs == 3)
-					printf("not supported\n");
+					iw_printf(keybuf, "not supported");
 				else
-					printf("MCS 0-%d\n", 7 + (mcs * 2));
+					iw_printf(keybuf, "MCS 0-%d", 7 + (mcs * 2));
 			}
-
+			iw_obj_close();
+			iw_obj_close();
 		}
+
 		mcs_used += 2 * sizeof(mcs_set[0]);
 	}
 
@@ -1411,12 +1470,23 @@ static void __print_he_capa(const __u16 *mac_cap,
 			ppet_len = 0;
 	}
 
-	if (ppet_len && (phy_cap[3] & BIT(15))) {
-		printf("%s\t\tPPE Threshold ", pre);
-		for (i = 0; i < ppet_len; i++)
-			if (ppet[i])
-				printf("0x%02x ", ppet[i]);
-		printf("\n");
+	{
+		char buf[64];
+		char *p = buf;
+		int bufleft = (int)sizeof(buf);
+		int written = 0;
+
+		for (i = 0; i < ppet_len; i++){
+			if (ppet[i]){
+				written = snprintf(p, bufleft, "0x%02x ", ppet[i]);
+				bufleft -= written;
+				p += written;
+			}
+		}
+
+		if (ppet_len && (phy_cap[3] & BIT(15))) {
+			iw_printf("PPE Threshold", "%s", buf);
+		}
 	}
 }
 
@@ -1425,9 +1495,9 @@ void print_iftype_list(const char *name, const char *pfx, struct nlattr *attr)
 	struct nlattr *ift;
 	int rem;
 
-	printf("%s:\n", name);
-	nla_for_each_nested(ift, attr, rem)
-		printf("%s * %s\n", pfx, iftype_name(nla_type(ift)));
+	nla_for_each_nested(ift, attr, rem){
+		iw_printf(name, "%s * %s", pfx, iftype_name(nla_type(ift)));
+	}
 }
 
 void print_iftype_line(struct nlattr *attr)
@@ -1461,9 +1531,9 @@ void print_he_info(struct nlattr *nl_iftype)
 	if (!tb[NL80211_BAND_IFTYPE_ATTR_IFTYPES])
 		return;
 
-	printf("\t\tHE Iftypes: ");
+	iw_obj_openf("HE Iftypes");
 	print_iftype_line(tb[NL80211_BAND_IFTYPE_ATTR_IFTYPES]);
-	printf("\n");
+	iw_obj_close();
 
 	if (tb[NL80211_BAND_IFTYPE_ATTR_HE_CAP_MAC]) {
 		len = nla_len(tb[NL80211_BAND_IFTYPE_ATTR_HE_CAP_MAC]);
@@ -1517,39 +1587,43 @@ static void __print_eht_capa(int band,
 			     bool indent)
 {
 	unsigned int i;
-	const char *pre = indent ? "\t" : "";
 	const char *mcs[] = { "0-7", "8-9", "10-11", "12-13"};
 
 	#define PRINT_EHT_CAP(_var, _idx, _bit, _str) \
 	do { \
 		if (_var[_idx] & BIT(_bit)) \
-			printf("%s\t\t\t" _str "\n", pre); \
+			iw_printf(NULL, _str); \
 	} while (0)
 
 	#define PRINT_EHT_CAP_MASK(_var, _idx, _shift, _mask, _str) \
 	do { \
 		if ((_var[_idx] >> _shift) & _mask) \
-			printf("%s\t\t\t" _str ": %d\n", pre, (_var[_idx] >> _shift) & _mask); \
+			iw_printf(NULL, "%s %d", _str, (_var[_idx] >> _shift) & _mask); \
 	} while (0)
 
 	#define PRINT_EHT_MAC_CAP(...) PRINT_EHT_CAP(mac_cap, __VA_ARGS__)
 	#define PRINT_EHT_PHY_CAP(...) PRINT_EHT_CAP(phy_cap, __VA_ARGS__)
 	#define PRINT_EHT_PHY_CAP_MASK(...) PRINT_EHT_CAP_MASK(phy_cap, __VA_ARGS__)
 
-	printf("%s\t\tEHT MAC Capabilities (0x", pre);
+	iw_obj_openf("EHT MAC Capabilities");
+	iw_arr_openf("Raw Data");
 	for (i = 0; i < 2; i++)
-		printf("%02x", mac_cap[i]);
-	printf("):\n");
+		iw_printf(NULL, "0x%02x", mac_cap[i]);
+	iw_arr_close();
 
+	iw_arr_openf("Data");
 	PRINT_EHT_MAC_CAP(0, 0, "NSEP priority access Supported");
 	PRINT_EHT_MAC_CAP(0, 1, "EHT OM Control Supported");
 	PRINT_EHT_MAC_CAP(0, 2, "Triggered TXOP Sharing Supported");
 	PRINT_EHT_MAC_CAP(0, 3, "ARR Supported");
+	iw_arr_close();
+	iw_obj_close();
 
-	printf("%s\t\tEHT PHY Capabilities: (0x", pre);
+	iw_obj_openf("EHT PHY Capabilities");
+	iw_arr_openf("Raw Data");
 	for (i = 0; i < 8; i++)
-		printf("%02x", ((__u8 *)phy_cap)[i]);
-	printf("):\n");
+		iw_printf(NULL, "0x%02x", ((__u8 *)phy_cap)[i]);
+	iw_arr_close();
 
 	PRINT_EHT_PHY_CAP(0, 1, "320MHz in 6GHz Supported");
 	PRINT_EHT_PHY_CAP(0, 2, "242-tone RU in BW wider than 20MHz Supported");
@@ -1593,49 +1667,56 @@ static void __print_eht_capa(int band,
 	PRINT_EHT_PHY_CAP(1, 28, "MU Beamformer (80MHz)");
 	PRINT_EHT_PHY_CAP(1, 29, "MU Beamformer (160MHz)");
 	PRINT_EHT_PHY_CAP(1, 30, "MU Beamformer (320MHz)");
+	iw_arr_close();
 
-	printf("%s\t\tEHT MCS/NSS: (0x", pre);
+	iw_arr_openf("EHT MCS/NSS");
 	for (i = 0; i < mcs_len; i++)
-		printf("%02x", ((__u8 *)mcs_set)[i]);
-	printf("):\n");
+		iw_printf(NULL, "0x%02x", ((__u8 *)mcs_set)[i]);
+	iw_arr_close();
+	iw_obj_close();
 
+	iw_obj_openf("HE Phy Capabilities");
+	iw_arr_openf("Data");
 	if (!(he_phy_cap[0] & ((BIT(2) | BIT(3) | BIT(4)) << 8))){
 		for (i = 0; i < 4; i++)
-			printf("%s\t\tEHT bw=20 MHz, max NSS for MCS %s: Rx=%u, Tx=%u\n",
-			       pre, mcs[i],
+			iw_printf(NULL, "EHT bw=20 MHz, max NSS for MCS %s: Rx=%u, Tx=%u",
+			       mcs[i],
 			       mcs_set[i] & 0xf, mcs_set[i] >> 4);
 	} else {
 		if (he_phy_cap[0] & (BIT(2) << 8)) {
 			for (i = 0; i < 3; i++)
-				printf("%s\t\tEHT bw <= 80 MHz, max NSS for MCS %s: Rx=%u, Tx=%u\n",
-				       pre, mcs[i + 1],
+				iw_printf(NULL, "EHT bw <= 80 MHz, max NSS for MCS %s: Rx=%u, Tx=%u",
+				       mcs[i + 1],
 				       mcs_set[i] & 0xf, mcs_set[i] >> 4);
 		}
 		mcs_set += 3;
 
 		if (he_phy_cap[0] & (BIT(3) << 8)) {
 			for (i = 0; i < 3; i++)
-				printf("%s\t\tEHT bw=160 MHz, max NSS for MCS %s: Rx=%u, Tx=%u\n",
-				       pre, mcs[i + 1],
+				iw_printf(NULL, "EHT bw=160 MHz, max NSS for MCS %s: Rx=%u, Tx=%u",
+				       mcs[i + 1],
 				       mcs_set[i] & 0xf, mcs_set[i] >> 4);
 		}
 
 		mcs_set += 3;
 		if (band == NL80211_BAND_6GHZ && (phy_cap[0] & BIT(1))) {
 			for (i = 0; i < 3; i++)
-				printf("%s\t\tEHT bw=320 MHz, max NSS for MCS %s: Rx=%u, Tx=%u\n",
-				       pre, mcs[i + 1],
+				iw_printf(NULL, "EHT bw=320 MHz, max NSS for MCS %s: Rx=%u, Tx=%u",
+				       mcs[i + 1],
 				       mcs_set[i] & 0xf, mcs_set[i] >> 4);
 		}
 	}
+	iw_arr_close();
 
 	if (ppet && ppet_len && (phy_cap[1] & BIT(11))) {
-		printf("%s\t\tEHT PPE Thresholds ", pre);
+		iw_arr_openf("EHT PPE Thresholds");
 		for (i = 0; i < ppet_len; i++)
 			if (ppet[i])
-				printf("0x%02x ", ppet[i]);
-		printf("\n");
+				iw_printf(NULL, "0x%02x", ppet[i]);
+		iw_arr_close();
 	}
+
+	iw_obj_close();
 }
 
 void print_eht_info(struct nlattr *nl_iftype, int band)
@@ -1867,7 +1948,7 @@ void print_s1g_capability(const uint8_t *caps)
 #define PRINT_S1G_CAP(_cond, _str) \
 	do { \
 		if (_cond) \
-			printf("\t\t\t" _str "\n"); \
+			iw_printf(NULL, _str); \
 	} while (0)
 
 	static char buf[20];
@@ -1875,8 +1956,16 @@ void print_s1g_capability(const uint8_t *caps)
 	uint8_t cap = caps[0];
 
 	/* S1G Capabilities Information subfield */
-	if (cap)
-		printf("\t\tByte[0]: 0x%02x\n", cap);
+	iw_printf("S1G Capabilities Raw Value", "0x"
+		"%02x%02x%02x%02x"
+		"%02x%02x%02x%02x"
+		"%02x%02x%02x%02x", 
+		caps[0], caps[1], caps[2], caps[3],
+		caps[4], caps[5], caps[6], caps[7],
+		caps[8], caps[9], caps[10], caps[11]
+	);
+
+	iw_arr_openf("Capabilities");
 
 	PRINT_S1G_CAP((cap & BIT(0)), "S1G PHY: S1G_LONG PPDU Format");
 
@@ -1888,7 +1977,7 @@ void print_s1g_capability(const uint8_t *caps)
 		offset += sprintf(buf + offset, "%s", ((cap >> 1) & 0x8) ? " 8" : "");
 		offset += sprintf(buf + offset, "%s", ((cap >> 1) & 0x10) ? " 16" : "");
 		offset += sprintf(buf + offset, " MHz");
-		printf("\t\t\t%s\n", buf);
+		iw_printf(NULL, buf);
 	}
 
 	PRINT_S1G_CAP(((cap >> 6) & 0x3) == 0x0, "Channel width: 1, 2 MHz");
@@ -1898,22 +1987,18 @@ void print_s1g_capability(const uint8_t *caps)
 
 	cap = caps[1];
 
-	if (cap)
-		printf("\t\tByte[1]: 0x%02x\n", cap);
-
 	PRINT_S1G_CAP((cap & BIT(0)), "Rx LDPC");
 	PRINT_S1G_CAP((cap & BIT(1)), "Tx STBC");
 	PRINT_S1G_CAP((cap & BIT(2)), "Rx STBC");
 	PRINT_S1G_CAP((cap & BIT(3)), "SU Beamformer");
 	PRINT_S1G_CAP((cap & BIT(4)), "SU Beamformee");
 	if (cap & BIT(4))
-		printf("\t\t\tBeamformee STS: %d\n", (cap >> 5) + 1);
+		iw_printf(NULL, "Beamformee STS: %d", (cap >> 5) + 1);
 
 	cap = caps[2];
-	printf("\t\tByte[2]: 0x%02x\n", cap);
 
 	if (caps[1] & BIT(3))
-		printf("\t\t\tSounding dimensions: %d\n", (cap & 0x7) + 1);
+		iw_printf(NULL, "Sounding dimensions", "%d", (cap & 0x7) + 1);
 
 	PRINT_S1G_CAP((cap & BIT(3)), "MU Beamformer");
 	PRINT_S1G_CAP((cap & BIT(4)), "MU Beamformee");
@@ -1923,25 +2008,23 @@ void print_s1g_capability(const uint8_t *caps)
 	PRINT_S1G_CAP(((cap >> 6) & 0x3) == 0x3, "Supports 1 and 2 STS Traveling Pilot");
 
 	cap = caps[3];
-	printf("\t\tByte[3]: 0x%02x\n", cap);
 	PRINT_S1G_CAP((cap & BIT(0)), "RD Responder");
 	/* BIT(1) in Byte 3 or BIT(25) in all capabilities is reserved */
 	PRINT_S1G_CAP(((cap & BIT(2)) == 0x0), "Max MPDU length: 3895 bytes");
 	PRINT_S1G_CAP((cap & BIT(2)), "Max MPDU length: 7991 bytes");
 
 	if (compute_ampdu_length((cap >> 2) & 0x3)) {
-		printf("\t\t\tMaximum AMPDU length: %d bytes (exponent: 0x0%02x)\n",
+		iw_printf(NULL, "Maximum AMPDU length: %d bytes (exponent: 0x0%02x)",
 		       compute_ampdu_length((cap >> 2) & 0x3), (cap >> 2) & 0x3);
 	} else {
-		printf("\t\t\tMaximum AMPDU length: unrecognized bytes (exponent: %d)\n",
+		iw_printf(NULL, "Maximum AMPDU length: unrecognized bytes (exponent: %d)",
 		       (cap >> 2) & 0x3);
 	}
 
-	printf("\t\t\tMinimum MPDU time spacing: %s (0x%02x)\n",
+	iw_printf(NULL, "Minimum MPDU time spacing: %s (0x%02x)",
 	       print_ampdu_space((cap >> 5) & 0x7), (cap >> 5) & 0x7);
 
 	cap = caps[4];
-	printf("\t\tByte[4]: 0x%02x\n", cap);
 	PRINT_S1G_CAP((cap & BIT(0)), "Uplink sync capable");
 	PRINT_S1G_CAP((cap & BIT(1)), "Dynamic AID");
 	PRINT_S1G_CAP((cap & BIT(2)), "BAT");
@@ -1953,7 +2036,6 @@ void print_s1g_capability(const uint8_t *caps)
 	PRINT_S1G_CAP(((cap >> 6) & 0x3) == 0x2, "Only non-sensor STAs");
 
 	cap = caps[5];
-	printf("\t\tByte[5]: 0x%02x\n", cap);
 	PRINT_S1G_CAP((cap & BIT(0)), "Centralized authentication control");
 	PRINT_S1G_CAP((cap & BIT(1)), "Distributed authentication control");
 	PRINT_S1G_CAP((cap & BIT(2)), "A-MSDU supported");
@@ -1966,9 +2048,6 @@ void print_s1g_capability(const uint8_t *caps)
 	PRINT_S1G_CAP(((cap >> 6) & 0x3) == 0x3, "Group and TXOP-based sectorization operations");
 
 	cap = caps[6];
-	if (cap)
-		printf("\t\tByte[6]: 0x%02x\n", cap);
-
 	PRINT_S1G_CAP((cap & BIT(0)), "OBSS mitigation");
 	PRINT_S1G_CAP((cap & BIT(1)), "Fragment BA");
 	PRINT_S1G_CAP((cap & BIT(2)), "NDP PS-Poll");
@@ -1985,7 +2064,6 @@ void print_s1g_capability(const uint8_t *caps)
 	}
 
 	cap = caps[7];
-	printf("\t\tByte[7]: 0x%02x\n", cap);
 	PRINT_S1G_CAP((cap & BIT(0)), "TACK support as PS-Poll response");
 	PRINT_S1G_CAP((cap & BIT(1)), "Duplicate 1 MHz");
 	PRINT_S1G_CAP((cap & BIT(2)), "MCS negotiation");
@@ -1996,52 +2074,47 @@ void print_s1g_capability(const uint8_t *caps)
 	PRINT_S1G_CAP((cap & BIT(7)), "Temporary PS mode switch");
 
 	cap = caps[8];
-	if (cap)
-		printf("\t\tByte[8]: 0x%02x\n", cap);
-
 	PRINT_S1G_CAP((cap & BIT(0)), "TWT grouping");
 	PRINT_S1G_CAP((cap & BIT(1)), "BDT capable");
-	printf("\t\t\tColor: %u\n", (cap >> 2) & 0x7);
+	iw_printf(NULL, "Color: %u", (cap >> 2) & 0x7);
 	PRINT_S1G_CAP((cap & BIT(5)), "TWT requester");
 	PRINT_S1G_CAP((cap & BIT(6)), "TWT responder");
 	PRINT_S1G_CAP((cap & BIT(7)), "PV1 frame support");
 
 	cap = caps[9];
-	if (cap)
-		printf("\t\tByte[9]: 0x%02x\n", cap);
-
 	PRINT_S1G_CAP((cap & BIT(0)), "Link Adaptation without NDP CMAC PPDU capable");
 	/* Rest of byte 9 bits are reserved */
 
 	/* Supported S1G-MCS and NSS Set subfield */
 	/* Rx S1G-MCS Map */
 	cap = caps[10];
-	printf("\t\tMax Rx S1G MCS Map: 0x%02x\n", cap);
-	printf("\t\t\tFor 1 SS: %s\n", s1g_ss_max_support(cap & 0x3));
-	printf("\t\t\tFor 2 SS: %s\n", s1g_ss_max_support((cap >> 2) & 0x3));
-	printf("\t\t\tFor 3 SS: %s\n", s1g_ss_max_support((cap >> 4) & 0x3));
-	printf("\t\t\tFor 4 SS: %s\n", s1g_ss_max_support((cap >> 6) & 0x3));
+	iw_printf(NULL, "Max Rx S1G MCS Map: 0x%02x", cap);
+	iw_printf(NULL, "For 1 SS: %s", s1g_ss_max_support(cap & 0x3));
+	iw_printf(NULL, "For 2 SS: %s", s1g_ss_max_support((cap >> 2) & 0x3));
+	iw_printf(NULL, "For 3 SS: %s", s1g_ss_max_support((cap >> 4) & 0x3));
+	iw_printf(NULL, "For 4 SS: %s", s1g_ss_max_support((cap >> 6) & 0x3));
 
 	/* Rx Long GI data rate field comprises of 9 bits */
 	cap = caps[11];
 	if (cap || caps[12] & 0x1)
-		printf("\t\t\tRx Highest Long GI Data Rate: %u Mbps\n",
+		iw_printf(NULL, "Rx Highest Long GI Data Rate: %u Mbps",
 		       cap + ((caps[12] & 0x1) << 8));
 
 	/* Tx S1G-MCS Map */
 	cap = caps[12];
-	printf("\t\tMax Tx S1G MCS Map: 0x%02x\n", cap);
-	printf("\t\t\tFor 1 SS: %s\n", s1g_ss_max_support((cap >> 1) & 0x3));
-	printf("\t\t\tFor 2 SS: %s\n", s1g_ss_max_support((cap >> 3) & 0x3));
-	printf("\t\t\tFor 3 SS: %s\n", s1g_ss_max_support((cap >> 5) & 0x3));
-	printf("\t\t\tFor 4 SS: %s\n", s1g_ss_max_support(((cap >> 7) & 0x1) +
+	iw_printf(NULL, "Max Tx S1G MCS Map: 0x%02x", cap);
+	iw_printf(NULL, "For 1 SS: %s", s1g_ss_max_support((cap >> 1) & 0x3));
+	iw_printf(NULL, "For 2 SS: %s", s1g_ss_max_support((cap >> 3) & 0x3));
+	iw_printf(NULL, "For 3 SS: %s", s1g_ss_max_support((cap >> 5) & 0x3));
+	iw_printf(NULL, "For 4 SS: %s", s1g_ss_max_support(((cap >> 7) & 0x1) +
 	       ((caps[13] << 1) & 0x2)));
 
 	/* Tx Long GI data rate field comprises of 9 bits */
 	cap = caps[13];
 	if (((cap >> 7) & 0x7f) || (caps[14] & 0x3))
-		printf("\t\t\tTx Highest Long GI Data Rate: %u Mbps\n", ((cap >> 7) & 0x7f) +
+		iw_printf(NULL, "Tx Highest Long GI Data Rate: %u Mbps", ((cap >> 7) & 0x7f) +
 			((caps[14] & 0x3) << 7));
+	if(cap) iw_arr_close();
 
 	/* Rx and Tx single spatial streams and S1G MCS Map for 1 MHz */
 	cap = (caps[15] >> 2) & 0xf;
@@ -2054,6 +2127,9 @@ void print_s1g_capability(const uint8_t *caps)
 	PRINT_S1G_CAP((cap & 0x3) == 0x1, "Tx single SS for 1 MHz: single SS and S1G-MCS 2");
 	PRINT_S1G_CAP((cap & 0x3) == 0x2, "Tx single SS for 1 MHz: single SS and S1G-MCS 7");
 	PRINT_S1G_CAP((cap & 0x3) == 0x3, "Tx single SS for 1 MHz: single SS and S1G-MCS 9");
+	
+	iw_arr_close();
+
 	/* Last 2 bits are reserved */
 #undef PRINT_S1G_CAP
 }
